@@ -1,0 +1,523 @@
+---
+title: "schedule"
+author: "Jonathan Sidi"
+date: "2/6/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(purrr)
+library(dplyr)
+library(lubridate)
+```
+
+```{r}
+
+doc <- docxtractr::read_docx(path = 'Axios-President-Donald-Trump-Private-Schedules.docx')
+
+```
+ 
+```{r}
+tbls <- doc%>%
+  docxtractr::docx_extract_all_tbls()
+
+```
+ 
+```{r}
+tbls[[1]]
+```
+ 
+```{r}
+days <- tbls%>%
+  purrr::map_dbl(.f=function(x) 'SCHEDULE.OF.THE.PRESIDENT'%in%names(x))%>%
+  cumsum()
+
+```
+ 
+```{r}
+tbls_days <- split(tbls,days)
+
+tbls_days <- tbls_days%>%
+  purrr::map(.f = function(x){
+  nm <- sprintf('V%s',1:ncol(x[[1]]))
+  
+  names(x[[1]]) <- nm
+  
+  if(length(x)==1){
+    return(x)
+  }
+  
+  for(i in 2:length(x)){
+    
+    r1 <- tibble::as_tibble(t(gsub('^X','',names(x[[i]]))))
+    names(x[[i]]) <- sprintf('V%s',1:ncol(r1))
+    
+    x[[i]] <- dplyr::bind_rows(r1,x[[i]])
+    
+    names(x[[i]]) <- nm[1:ncol(r1)]
+  }
+  
+  dplyr::bind_rows(x)
+})
+
+tbls_days <- purrr::map(tbls_days,.f=function(x){
+  if(!inherits(x,'tbl'))
+    x <- x[[1]]
+  
+  x
+})
+
+
+```
+ 
+```{r}
+tbls_days[[1]]
+```
+ 
+```{r}
+missed_dates <- purrr::map(tbls_days,.f=function(y){
+  ret <- apply(y,2,FUN = function(x){
+   grepl('2018|2019',x)
+  })
+  
+  which(ret==TRUE,arr.ind = TRUE)%>%
+    tibble::as_tibble()%>%
+    dplyr::arrange(row)
+  
+})%>%
+  tibble::enframe(name = 'table')%>%
+  dplyr::filter(purrr::map_lgl(value,.f=function(x) nrow(x)>1))
+
+
+missed_dates <- missed_dates%>%
+  dplyr::mutate(
+    tbls = tbls_days[missed_dates$table],
+    value = purrr::map2(tbls,value,
+                    .f = function(tbl,value){
+                      
+                      value$val <- NA
+                      
+                      for(i in 1:nrow(value)){
+                        value$val[i] <- tbl[value$row[i],value$col[i]]
+                      }
+                      
+                      value$val <- purrr::flatten_chr(value$val)
+                      
+                      value%>%
+                        dplyr::slice(-1)
+                      
+  })
+)
+
+bad_index <- missed_dates%>%dplyr::select(table,value)%>%tidyr::unnest()%>%dplyr::filter(grepl('[.,]',val))
+
+split_tbls <- function(tbl,r,tbls_days){
+  x <- tbls_days[[tbl]]
+  v <- rep(1,nrow(x))
+  v[r[1]:nrow(x)] <- 2
+  new_tbls <- split(x,v)
+  new_tbls[[2]][1,] <- gsub('\\.',' ',gsub('\\.\\.',', ',new_tbls[[2]][1,]))
+  new_tbls  
+}
+
+new_tbls <- purrr::map2(bad_index$table,bad_index$row,split_tbls,tbls_days)%>%
+  purrr::flatten()%>%
+  unname()
+
+tbls_days <- append(tbls_days[-as.numeric(bad_index$table)],new_tbls)
+
+names(tbls_days) <- 1:length(tbls_days)
+
+```
+ 
+```{r}
+dates <- tbls_days%>%purrr::map_chr(.f=function(x){
+  idx <- purrr::map_lgl(x[1,],.f=function(xx) nzchar(xx)&!is.na(xx))
+  x[1,idx][[1]]
+})
+
+names(tbls_days) <- dates 
+
+format(sort(strptime(names(tbls_days),'%A, %B %d, %Y')),format = '%m/%d (%A)')
+
+```
+ 
+```{r}
+fna <- function(x){
+  x[grepl('^NA\\.$',x)] <- NA
+  x[!nzchar(x)] <- NA
+  x
+}
+
+fna0 <- function(x){
+  x[-c(1:2),]
+}
+
+fna1 <- function(x){
+  x[apply(x,1,function(y) !all(is.na(y))),]
+}
+
+fna2 <- function(x){
+  x[,apply(x,2,function(y) !all(is.na(y)))]
+}
+```
+ 
+```{r}
+tbls_days_trim <- tbls_days%>%
+  purrr::map_df(.f=function(x){
+    
+    ret <- x%>%
+      dplyr::mutate_all(fna)%>%
+      fna0%>%
+      fna2 
+    
+    names(ret)[1] <- 'TIME'
+    L_idx <- grep('^Location\\:$',ret$V2)
+    ret$V3[L_idx-1] <- ret$V3[L_idx]
+    ret <- ret[-L_idx,]
+    
+    
+    A_idx <- grep('\\:$',ret$V2)
+    if(length(A_idx)>0){
+      if(ncol(ret)<4){
+        ret$V4 <- NA
+      }
+      ret[A_idx,c('V3','V4')] <- ret[A_idx,c('V2','V3')]
+      ret$V2[A_idx] <- NA  
+    }
+    
+    B_idx <- grep('^\\(',ret$TIME)
+    B_idx <- B_idx[!is.na(ret$V2[B_idx])]
+    
+    for(i in B_idx){
+      ret$V2[i - 1] <- paste(ret$V2[i - 1],ret$V2[i])  
+      ret$V2[i] <- NA
+    }
+    
+    if('V5'%in%names(ret)){
+      C_idx <- which(!is.na(ret$V5))
+      
+      for(i in C_idx){
+        ret$V4[i - 1] <- paste(ret$V4[i - 1],ret$V5[i])  
+        ret$V5[i] <- NA
+      }
+      ret$V5 <- NULL
+    }
+    
+    
+    DUR_idx <- grep('^\\(',ret$TIME)
+    if(length(DUR_idx)>0){
+      ret$V3[DUR_idx]  <- 'Duration:'
+      ret$V4[DUR_idx] <- ret$TIME[DUR_idx]
+      ret$TIME[DUR_idx] <- NA  
+    }
+    
+    ret <- ret%>%
+      fna1
+    
+    names(ret)[c(2,3)] <- c('TASK','FIELD')
+    
+    RON_idx <- grep('^RON\\:$',ret$TIME)
+    
+    ret$FIELD[RON_idx] <- ret$TASK[RON_idx]
+    ret$TASK[RON_idx] <- 'RON'
+    ret$TIME[RON_idx] <- ret$TIME[RON_idx - 1]
+    
+    ret$TASK <- toupper(gsub('\\.',' ',ret$TASK))
+    
+    TIME_idx <- which(grepl('^(AM|PM)',ret$TASK))
+    
+    if(length(TIME_idx)>0){
+      ret$TIME[TIME_idx] <- paste(ret$TIME[TIME_idx],ret$TASK[TIME_idx])
+      ret$TASK[TIME_idx] <- NA
+    }
+    
+    ret$TIME <- gsub('\\.',' ',ret$TIME)
+    
+    ret$TIME <- gsub('\\s+',' ',ret$TIME)
+    ret$TASK <- gsub('\\s+',' ',ret$TASK)
+    
+    f_idx <- which(!grepl('\\:$',ret$FIELD)&!is.na(ret$FIELD))
+    
+    if(length(f_idx)>0){
+      ret$V4[f_idx] <- ret$FIELD[f_idx]
+      ret$FIELD[f_idx] <- 'Location:'
+    }
+    
+    ret <- ret%>%
+      tidyr::fill(TIME,TASK)%>%
+      tidyr::nest(-c(TIME,TASK),.key='NOTES')
+    
+    ret
+    
+  },.id='DATE')
+
+
+
+tbls_days_trim <- tbls_days_trim%>%
+  dplyr::mutate(
+    NOTES = purrr::map(NOTES,.f=function(x){
+      
+      x%>%
+        dplyr::filter(!is.na(FIELD))%>%
+        dplyr::mutate(
+          FIELD = gsub('\\:','',FIELD),
+          FIELD = gsub('\\s','_',FIELD)
+        )
+    })
+  )
+```
+
+```{r}
+final <- tbls_days_trim%>%
+  tidyr::unnest(NOTES)%>%
+  dplyr::filter(!grepl('EST',V4)&TIME!='RON')%>%
+  dplyr::distinct()
+
+final <- final%>%dplyr::group_by(DATE,TIME,TASK,FIELD)%>%dplyr::mutate(n=1:dplyr::n())
+
+final_rep <- final%>%dplyr::filter(n>1)%>%dplyr::select(DATE,TIME,TASK,FIELD)%>%dplyr::distinct()%>%dplyr::mutate(flag = TRUE)
+
+final <- final%>%dplyr::left_join(final_rep)%>%dplyr::mutate(flag = ifelse(is.na(flag),FALSE,flag))%>%dplyr::ungroup()
+
+final_idx <- final%>%dplyr::mutate(n=1:dplyr::n())%>%dplyr::filter(flag)
+
+bad_idx <- final_idx%>%dplyr::pull(n)
+
+```
+
+```{r}
+final$FIELD[bad_idx[c(1,3,8,22)]] <- 'Project_Officer'
+final$TASK[bad_idx[c(5,7,10,12,14,16,18)]] <- paste(final$TASK[bad_idx[c(5,7,10,12,14,16,18)]],final$V4[bad_idx[c(5,7,10,12,14,16,18)]])
+final <- final%>%dplyr::slice(-bad_idx[c(5,7,10,12,14,16,18,20)])
+```
+
+```{r}
+final_wide <- final%>%
+  dplyr::select(-c(n,flag))%>%
+  tidyr::spread(FIELD,V4)
+```
+
+
+```{r}
+press_idx <- which(is.na(final_wide$Location)&!is.na(final_wide$Press))
+final_wide$Location[press_idx] <- final_wide$Press[press_idx]
+final_wide$Press[press_idx] <- NA
+
+```
+ 
+```{r}
+idx <- 33
+final_wide$Project_Officer[idx] <- final_wide$Location[idx]
+final_wide$Location[idx] <- final_wide$Press[idx]
+final_wide$Press[idx] <- NA
+
+```
+ 
+```{r}
+idx <- which(!is.na(final_wide$Program_Officer))
+final_wide$Project_Officer[idx] <- final_wide$Program_Officer[idx]
+final_wide$Program_Officer[idx] <- NA
+final_wide$Program_Officer <- NULL
+
+```
+ 
+```{r}
+idx <- which(!is.na(final_wide$RON))
+final_wide$Location[idx] <- final_wide$RON[idx]
+final_wide$RON <- NULL
+```
+ 
+```{r}
+idx <- which(!is.na(final_wide$Project_Office))
+final_wide$Project_Officer[idx] <- final_wide$Project_Office[idx]
+final_wide$Project_Office <- NULL
+
+```
+ 
+```{r}
+idx <- grep('Tupelo\\.\\.MS',final_wide$Location)
+final_wide$Press[idx - 2] <- final_wide$Location[idx - 2]
+final_wide$Location[idx - 2] <- 'Tupelo, MS'
+final_wide <- final_wide[-idx,]
+
+```
+ 
+```{r}
+final_wide$TASK[522] <- paste(final_wide$TASK[521],final_wide$TASK[522])
+final_wide$Duration[522] <- final_wide$Duration[521]
+final_wide <- final_wide[-521,]
+```
+ 
+```{r}
+idx <- grep('NOTE: THE FIRST LADY WILL ATTEND',final_wide$TASK)
+final_wide$Note[idx - 1] <- 'The First Lady will attend'
+final_wide <- final_wide[-idx,]
+
+```
+ 
+```{r}
+idx <- grep('NA OF THE REPUBLIC OF INDIA',final_wide$TASK)
+final_wide$TASK[idx] <- 'TRILATERAL MEETING WITH THE PRIME MINISTER OF JAPAN AND THE PRIME MINISTER OF THE REPUBLIC OF INDIA'
+
+idx <- grep('NA AUSTRALIA',final_wide$TASK)
+final_wide$TASK[idx] <-'BILATERAL PULL-ASIDE WITH THE PRIME MINISTER OF THE COMMONWEALTH OF AUSTRALIA'
+
+idx <- grep('NA LEADERS',final_wide$TASK)
+final_wide$TASK[idx] <- 'IRST STEP ACT ROUNDTABLE WITH GOVERNOR PHIL BRYANT AND LAW ENFORCEMENT LEADERS'
+
+```
+
+```{r}
+idx <- grep('PARTICIPANTS',final_wide$TASK)
+final_wide$TASK[idx] <- paste(final_wide$TASK[idx + 1],final_wide$TASK[idx])
+final_wide$Duration[idx] <- final_wide$Duration[idx + 1]
+final_wide <- final_wide[-(idx + 1),]
+
+```
+
+```{r}
+final_type <- final_wide%>%
+  dplyr::mutate(TYPE = dplyr::case_when(
+    grepl('DEPART|ARRIVE',TASK) ~ 'TRAVEL',
+    grepl('EXECUTIVE',TASK) ~ 'EXECUTIVE',
+    grepl('LUNCH|DINNER',TASK) ~ 'FOOD',
+    grepl('RALLY',TASK) ~ 'RALLY',
+    grepl('MEDIA|PHOTO OPPORTUNITY|ANNOUNCEMENT|VISIT|CEREMONY|PHOTO|CEREMONY|CHRISTMAS|CLEMSON|SIGNING|INTERVIEW|VIDEO RECORDING|CONVENTION',TASK) ~ 'MEDIA',
+    grepl('CEREMONIAL|FUNERAL|PERFORMANCE|INVESTITURE|MEET AND GREET|RECEPTION|OPENING REMARKS',TASK) ~ 'CEREMONY',
+    grepl('BRIEFING|DISCUSSION|POLICY|BRIEF|ROUNDTABLE|SPEECH PREP|PHONE CALL|HUMAN TRAFFICKING|PULL-ASIDE|MEETING|CONFERENCE|REMARKS',TASK) ~ 'WORK',
+    grepl('RON',TASK) ~ 'RON',
+    TRUE ~ 'OTHER')
+    )
+```
+
+```{r}
+final_type$TIME_SHIFT <- 0
+
+tz_idx <- which(!grepl('(AM|PM)$',final_type$TIME))
+
+final_type$TIME_SHIFT[grepl('CST$',final_type$TIME)] <- -1
+final_type$TIME_SHIFT[c(25:29,163:168,217:229,268:273)] <- -1
+
+final_type$TIME_SHIFT[final_type$DATE=='Friday, November 30, 2018'] <- 2
+
+final_type$TIME <- gsub(' (CST|EST|E ST|Local)','',final_type$TIME)
+final_type$TIME <- gsub('TBD','8:00 AM',final_type$TIME)
+
+final_type$TIME_MISS <- sapply(gregexpr('\\s', final_type$TIME),length)
+final_type$TIME[final_type$TIME_MISS>1] <- sub('\\s',':',final_type$TIME[final_type$TIME_MISS>1])
+
+final_type$TIME <- strptime(final_type$TIME,'%I:%M %p') + (final_type$TIME_SHIFT*60*60)
+final_type$TIME <- format(final_type$TIME,format = "%H:%M:%S")
+final_type$TIME_MISS <- NULL
+```
+
+```{r}
+
+final_type$DATE <- as.Date(strptime(final_type$DATE,'%A, %B %d, %Y'))
+
+
+```
+ 
+```{r}
+final_type$DATE_TIME <- as.POSIXct(paste(final_type$DATE,final_type$TIME))
+
+```
+
+```{r}
+pad_day <- function(x){
+  
+  start <- head(x,1)
+  end <- tail(x,1)
+  
+  start$TIME <- '00:00:00'
+  start$DATE_TIME <- as.POSIXct(paste(as.Date(start$DATE_TIME),start$TIME))
+  start$TASK <- 'PRE DAY'
+  start[1,c(3:9)] <- NA
+  
+  end$TIME <- '23:59:59'
+  end$DATE_TIME <- as.POSIXct(paste(as.Date(start$DATE_TIME),end$TIME))
+  end$TASK <- 'POST DAY'
+  end[1,c(3:9)] <- NA
+  
+  ret <- dplyr::bind_rows(start,x,end)
+  
+  ret <- ret%>%
+    dplyr::mutate(
+      TIME_END = dplyr::lead(TIME,1)
+    )%>%
+    head(.,-1)
+  
+  
+  ret$DATE_TIME_END <- as.POSIXct(paste(as.Date(ret$DATE_TIME),ret$TIME_END))
+  
+  ret
+}
+
+time_find <- function(x,y){
+  
+  xx <- as.POSIXct(x$created_at)
+  lb <- y$DATE_TIME
+  ub <- y$DATE_TIME_END
+  
+  
+  TASK <- purrr::map_chr(xx, function(x){
+    ret <- y$TASK[which(x%within%lubridate::interval(lb,ub))] 
+    if(length(ret)>1){
+      ret <- tail(ret,1)
+    }
+    
+    ret
+  })
+  
+  x$TASK <- TASK
+  x%>%tidyr::nest(-TASK,.key='tweets')
+}
+
+```
+
+```{r}
+schedule <- final_type%>%
+  dplyr::filter(!is.na(DATE))%>%
+  dplyr::rename(date=DATE)%>%
+  dplyr::arrange(DATE_TIME)%>%
+  tidyr::nest(-date,.key='schedule')%>%
+  dplyr::mutate(schedule = purrr::map(schedule,pad_day))
+
+```
+
+```{r}
+twn <- readRDS(file = 'tweets.Rds')
+
+```
+ 
+```{r}
+final_tweet <- schedule%>%
+  dplyr::left_join(twn,by='date')%>%
+  dplyr::mutate(n_tweet = purrr::map_dbl(tweet,nrow))
+
+final_tweet <- final_tweet%>%
+  dplyr::mutate(
+    intersect  = purrr::map2(tweet,schedule,time_find),
+    merge = purrr::map2(schedule,intersect,.f=function(x,y) x%>%dplyr::left_join(y,by='TASK'))
+  )  
+```
+
+```{r}
+ret <- final_tweet%>%dplyr::select(date,merge)%>%tidyr::unnest(merge)
+
+axios <- ret%>%
+  dplyr::filter(purrr::map_lgl(tweets,.f=function(x) !is.null(x)))%>%
+  tidyr::unnest(tweets)%>%
+  dplyr::mutate(
+    TYPE = ifelse(is.na(TYPE),'PREDAY',TYPE)
+  )
+```
+
+```{r,eval=FALSE}
+final_type$Duration <- gsub('\\(|\\)',final_type$Duration)
+```
