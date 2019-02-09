@@ -9,7 +9,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r}
+```{r,warning=FALSE,message=FALSE}
 library(purrr)
 library(dplyr)
 library(lubridate)
@@ -128,6 +128,11 @@ new_tbls <- purrr::map2(bad_index$table,bad_index$row,split_tbls,tbls_days)%>%
   purrr::flatten()%>%
   unname()
 
+new_tbls[[7]] <- new_tbls[[1]]%>%slice(1:30)
+new_tbls[[8]] <- dplyr::bind_rows(new_tbls[[7]][1:2,],new_tbls[[1]]%>%slice(31:nrow(.)))
+new_tbls[[8]]$V4 <- gsub('Tuesday, December 4','Wednesday, December 5',new_tbls[[8]]$V4)
+new_tbls <- new_tbls[-1]
+  
 tbls_days <- append(tbls_days[-as.numeric(bad_index$table)],new_tbls)
 
 names(tbls_days) <- 1:length(tbls_days)
@@ -348,9 +353,10 @@ final_wide <- final_wide[-idx,]
 ```
  
 ```{r}
-final_wide$TASK[522] <- paste(final_wide$TASK[521],final_wide$TASK[522])
-final_wide$Duration[522] <- final_wide$Duration[521]
-final_wide <- final_wide[-521,]
+idx <- 522
+final_wide$TASK[idx] <- paste(final_wide$TASK[idx-1],final_wide$TASK[idx])
+final_wide$Duration[idx] <- final_wide$Duration[idx-1]
+final_wide <- final_wide[-(idx -1),]
 ```
  
 ```{r}
@@ -378,6 +384,11 @@ final_wide$TASK[idx] <- paste(final_wide$TASK[idx + 1],final_wide$TASK[idx])
 final_wide$Duration[idx] <- final_wide$Duration[idx + 1]
 final_wide <- final_wide[-(idx + 1),]
 
+```
+
+```{r}
+idx <- grep('^ARRIVE MCALLEN',final_wide$TASK)
+final_wide$TASK[idx] <- toupper(final_wide$Location[idx])
 ```
 
 ```{r}
@@ -414,22 +425,61 @@ final_type$TIME[final_type$TIME_MISS>1] <- sub('\\s',':',final_type$TIME[final_t
 final_type$TIME <- strptime(final_type$TIME,'%I:%M %p') + (final_type$TIME_SHIFT*60*60)
 final_type$TIME <- format(final_type$TIME,format = "%H:%M:%S")
 final_type$TIME_MISS <- NULL
+
 ```
 
 ```{r}
-
 final_type$DATE <- as.Date(strptime(final_type$DATE,'%A, %B %d, %Y'))
 
+idx <- which(is.na(final_type$TIME))
+
+final_type$TIME[idx] <- '20:10:00'
+final_type$DATE[idx] <- as.Date('2019-01-10')
+
+final_type$DATE_TIME <- lubridate::as_datetime(paste(final_type$DATE,final_type$TIME),tz='EST')
+
+final_type <- final_type%>%
+  dplyr::filter(!is.na(DATE))%>%
+  dplyr::rename(date=DATE)%>%
+  dplyr::arrange(DATE_TIME)
+```
+
+```{r}
+
+final_type$Duration <- gsub('\\(|\\)','',final_type$Duration)
+final_type$Duration <- gsub(',',' + ',final_type$Duration)
+final_type$Duration <- gsub('hr',' * 60 ',final_type$Duration)
+final_type$Duration <- gsub('min',' * 1 ',final_type$Duration)
+idx <- !is.na(final_type$Duration)
+final_type$Duration[idx] <- eval(parse(text = final_type$Duration[idx]))
+final_type$Duration <- as.numeric(final_type$Duration) * 60
 
 ```
- 
-```{r}
-final_type$DATE_TIME <- as.POSIXct(paste(final_type$DATE,final_type$TIME))
-
-```
 
 ```{r}
-pad_day <- function(x){
+pad_day <- function(x0){
+  
+  x <- x0%>%
+    dplyr::arrange(DATE_TIME)
+  
+  if(!'RON'%in%x$TASK){
+    x <- dplyr::bind_rows(x,tail(x,1))
+    x$TASK[nrow(x)] <- 'RON'
+  }
+  
+  idx <- grep('^RON$',x$TASK)
+  
+  if(idx!=nrow(x)){
+    x[idx:nrow(x),] <- x[nrow(x):idx,]
+  }
+  
+  if(!is.na(x$Duration[nrow(x)-1])){
+    x$TIME[nrow(x)] <- format(strptime(
+      x$TIME[nrow(x) - 1],
+      format = '%H:%M:%S'
+      ) + x$Duration[nrow(x) - 1],
+      format = '%H:%M:%S')
+  }
   
   start <- head(x,1)
   end <- tail(x,1)
@@ -455,6 +505,9 @@ pad_day <- function(x){
   
   ret$DATE_TIME_END <- as.POSIXct(paste(as.Date(ret$DATE_TIME),ret$TIME_END))
   
+  ret <- ret%>%
+    dplyr::arrange(DATE_TIME_END)
+  
   ret
 }
 
@@ -471,6 +524,10 @@ time_find <- function(x,y){
       ret <- tail(ret,1)
     }
     
+    if(length(ret)==0){
+      ret <- NA_character_
+    }
+    
     ret
   })
   
@@ -482,9 +539,6 @@ time_find <- function(x,y){
 
 ```{r}
 schedule <- final_type%>%
-  dplyr::filter(!is.na(DATE))%>%
-  dplyr::rename(date=DATE)%>%
-  dplyr::arrange(DATE_TIME)%>%
   tidyr::nest(-date,.key='schedule')%>%
   dplyr::mutate(schedule = purrr::map(schedule,pad_day))
 
@@ -518,6 +572,6 @@ axios <- ret%>%
   )
 ```
 
-```{r,eval=FALSE}
-final_type$Duration <- gsub('\\(|\\)',final_type$Duration)
+```{r}
+saveRDS(axios,file = 'axios.Rds')
 ```
