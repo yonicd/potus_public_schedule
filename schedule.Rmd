@@ -568,7 +568,8 @@ axios <- ret%>%
   dplyr::filter(purrr::map_lgl(tweets,.f=function(x) !is.null(x)))%>%
   tidyr::unnest(tweets)%>%
   dplyr::mutate(
-    TYPE = ifelse(is.na(TYPE),'PREDAY',TYPE)
+    TYPE = ifelse(is.na(TYPE),'PREDAY',TYPE),
+    TYPE = ifelse(TASK=='RON','RON',TYPE)
   )
 ```
 
